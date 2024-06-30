@@ -1,0 +1,251 @@
+---
+title: "Quantization"
+format:
+  html:
+    code-fold: true
+jupyter: python3
+---
+
+# Quantization
+
+> The notes below are adapted from MIT 6.5940 *TinyML and Efficient Deep Learning Computing* course, along with other resources as indicated.
+
+Serving a 175B GPT-3 model requires at least
+
+-   FP16 : 350 GB of memory → 5 X 80GB A100 GPUs
+-   INT8 : 175 GB of memory → 3 x 80GB A100 GPUs
+
+Lower bits are important for both compute and memory requirements.
+
+Before we dive into quantization, here is a quick detour to explore various numerical types.
+
+*Quick Detour to explore numerical types*
+
+# Numerical types
+
+## Integer
+
+| Type                            | n-bit Range                |
+|---------------------------------|----------------------------|
+| Unsigned Integer                | $[0, 2^n -1]$              |
+| Signed-Magnitude Representation | $[-2^{n-1}-1,  2^{n-1}-1]$ |
+| Two’s complement Representation | $[-2^{n-1}, 2^{n-1}-1]$    |
+
+![Untitled](Quantization%2078a1bf4501514e67a48095d1dc67d3bc/Untitled%201.png)
+
+![Untitled](Quantization%2078a1bf4501514e67a48095d1dc67d3bc/Untitled%202.png)
+
+Note:
+
+1.  For Signed Magnitude Representation, both 000…00 and 100..00 represent 0
+2.  For Two’s Complement Representation, 000…00 represent 0 and 100…00 represents $-2^{n-1}$
+
+## Fixed-Point Number
+
+A fixed-point number is a way of representing fractional values by storing a fixed number of digits after the decimal (or binary) point. It has a fixed number of digits for the integer part and a fixed number of digits for the fractional part.
+
+## Floating-Point Number
+
+A floating-point number is a way to represent real numbers approximately using a fixed number of digits, with the decimal point position being variable (floating).Check this out as well
+
+https://huggingface.co/blog/4bit-transformers-bitsandbytes
+
+https://huggingface.co/blog/hf-bitsandbytes-integration
+
+| Numerical Type | Exponent (bits) | Fraction/Mantissa (bits) | Total (bits) |
+|----------------|-----------------|--------------------------|--------------|
+| FP32           | 8               | 23                       | 32           |
+| FP16           | 5               | 10                       | 16           |
+| BF16           | 8               | 7                        | 16           |
+| FP8 E4M3       | 4               | 3                        | 8            |
+| FP8 E5M2       | 5               | 2                        | 8            |
+
+Exponent bits are important for dynamic range, and having a larger dynamic range is important during training. Fraction width indicates precision.
+
+![Untitled](Quantization%2078a1bf4501514e67a48095d1dc67d3bc/Untitled%205.png)
+
+# Quantization
+
+Recap: In the context of Deep Learning, quantization refers to the process of numerically reducing and storing parameters (weights, activations etc.) in neural networks at lower bit-widths than original e.g. from 32-bit Floating-Point (FP32) values to 4-bit Integer values (INT4). (https://pytorch.org/docs/stable/quantization.html)
+
+Quick note: If a model has 100M parameters, each requiring 32 bits, what is the memory requirement?
+
+-   **Determine the total number of bits required**: Multiply the number of parameters by the number of bits per parameter:100,000,000 parameters × 32 bits per parameter = 3,200,000,000 bits
+
+-   **Convert bits to bytes**: Since there are 8 bits in a byte, divide the total number of bits by 8 to get the total number of bytes: $\frac{3,200,000,000 \text{ bits}}{8}$ = 400,000,000 bytes
+
+-   **Convert bytes to more manageable units (like megabytes)**: There are 1,024 bytes in a kilobyte (KB) and 1,024) kilobytes in a megabyte (MB), so:
+
+    $\frac{400,000,000 \, \text{bytes}}{1,024 \, \text{bytes/KB}} = 390,625 \, \text{KB}$ , $\frac{390,625 \, \text{KB}}{1,024 \, \text{KB/MB}} \approx 381.47 \, \text{MB}$
+
+Therefore, a model with 100 million parameters, each requiring 32 bits of storage, will require approximately 381.47 megabytes of storage.
+
+**Why this amount of storage?**:
+
+-   Each parameter in the model is stored as a 32-bit floating point number, which is a common representation for parameters in neural networks to maintain a balance between precision and storage. Each bit in a 32-bit representation contributes to encoding the magnitude, sign, or exponent of the floating-point number, allowing the model to represent both very large and very small values with sufficient precision.
+-   The calculation ensures all the data related to the model's parameters can be stored and retrieved as needed for model computations, such as during training or inference. Reducing the bit size per parameter (quantization) would decrease the storage requirement but potentially at the cost of accuracy and model performance.
+
+## Neural Network Quantization
+
+|   | Original | K-means Quantization | Linear Quantization | Binary/Ternary Quantization |
+|---------------|---------------|---------------|---------------|---------------|
+| Storage/Memory | Floating-Point Weights | Integer Weights; Floating-Point Codebook | Integer Weights |  |
+| Computation | Floating-Point Arithmetic | Floating-Point Arithmetic | Integer Arithmetic |  |
+
+### K-means-based Weight Quantization
+
+![Untitled](Quantization%2078a1bf4501514e67a48095d1dc67d3bc/Untitled%206.png)
+
+K-means-based weight quantization is a technique used to reduce the precision of weights in neural networks, thereby compressing the model size and reducing computational requirements. It works as follows:
+
+1.  The weights of the neural network are treated as high-precision floating-point values that need to be quantized.
+2.  K-means clustering is applied to the weights, grouping them into K distinct clusters. The number of clusters K determines the bit-width of the quantized weights (e.g., K=256 for 8-bit quantization).
+3.  Each cluster is represented by a centroid value, which becomes the quantized value for all weights belonging to that cluster.
+4.  The original high-precision weights are replaced by the centroid values of their respective clusters. This quantizes the weights to a lower bit-width representation.
+
+The key steps are:
+
+-   Flatten all weights of the model into a vector
+-   Apply K-means clustering on this vector to group weights into K clusters
+-   Replace each weight by the centroid value of its cluster
+
+This clustering-based approach can achieve higher accuracy than simple linear quantization techniques, especially for non-uniform weight distributions. The *quantization error* is the difference between the original weight and the centroid value, which can be backpropagated during training to fine-tune the centroids.
+
+K-means-based quantization provides a good tradeoff between compression ratio and accuracy loss. It can significantly reduce model size with a relatively small drop in accuracy compared to the full-precision model. The choice of $K$ (number of clusters) allows controlling the compression ratio and quantization error.
+
+The weights are decompressed using a lookup table (i.e. a codebook) during runtime inference.
+
+All the computation and memory access are still floating point; K-means-based Weight Quantization only saves storage cost of a neural network model.
+
+### Linear Quantization
+
+This refers to an affine transformation of integers to real numbers
+
+$r = S(q-Z)$
+
+$S = \frac{r_{max} - r_{min}}{q_{max} - q_{min}}$
+
+$Z = round(q_{min} - \frac{r_{min}}{S})$
+
+$r$ ← floating point
+
+$S$ ← scaling
+
+$q$ ← quantised integer
+
+$Z$ ← zero point
+
+![Untitled](Quantization%2078a1bf4501514e67a48095d1dc67d3bc/Untitled%207.png)
+
+X
+
+![Untitled](Quantization%2078a1bf4501514e67a48095d1dc67d3bc/Untitled%208.png)
+
+### Symmetric Linear Quantization
+
+![Untitled](Quantization%2078a1bf4501514e67a48095d1dc67d3bc/Untitled%209.png)
+
+Here, $r_{min} = S (q_{min} - Z)$
+
+$S = \frac{r_{min}}{q_{min} - Z} = \frac{-|r_{max}|}{q_{min}} = \frac{|r_{max}|}{2^N - 1}$
+
+# Post-Training Quantization
+
+Post-Training Quantization refers to reduction of model size by quantizing the weights and activations post-training, without the need to re-train or fine-tune the model. (https://arxiv.org/pdf/1810.05723)
+
+## Quantization Granularity
+
+**Per-Tensor Quantization** ([Jacob et al., CVPR 2018](https://arxiv.org/abs/1712.05877), [Markus et al.](https://arxiv.org/abs/1906.04721))
+
+Per-Tensor Quantization indicates that all the values within the tensor are quantized the same way with the same quantization parameters \[1\].
+
+It uses a single scaling-factor $S$ for the entire tensor $(r_{max} = W_{max})$
+
+**Per-Channel Quantization** ([ICCV 2019](https://arxiv.org/abs/1906.04721))
+
+Per-Channel Quantization indicates the values in the tensor, for each channel dimension typically, are quantized with different quantization parameters.
+
+![Source: <https://arxiv.org/pdf/2211.10438>](Quantization%2078a1bf4501514e67a48095d1dc67d3bc/Untitled%2010.png)
+
+Source: <https://arxiv.org/pdf/2211.10438>
+
+**Group Quantization**
+
+-   **Per-Vector Quantization**
+
+This equips a Hierarchical Scaling Factor, this implies
+
+```         
+                                                $r = \gamma \cdot S_q(q - Z)$
+```
+
+-   $\gamma$ is a floating-point coarse grained scale factor
+
+-   $S_q$ is an integer per-vector scale factor
+
+-   achieves a balance accuracy and hardware efficiency by
+
+    -   less expensive integer scale factors at finer granularity, and
+    -   more expensive floating-point scale factors at coarser granularity
+
+-   **Shared micro-exponent (MX) data type (**<https://arxiv.org/pdf/2302.08007>)
+
+    ```         
+         **TBA**
+    ```
+
+Note: Balance between accuracy and efficiency - the finer the granularity goal, the greater the accuracy, the higher the redundancy and larger memory overhead
+
+\[3\]
+
+## Dynamic Range Clipping
+
+### Dynamic Range for Activation Quantization
+
+Collect activation statistics before deploying the model
+
+Type 1: Run training
+
+Type 2: Run a few calibration batches of samples on the trained FP32 model
+
+-   minimize the loss of information, since the integer model encodes the same information as the original floating-point model
+    -   loss of information is measured by Kullback-Leibler divergence since KL divergence measures the amount of information lost when approximating a given encoding
+
+        $D_{KL} (P || Q) = \sum_i^N P(x_i)\log \frac{P(x_i)}{Q(x_i)}$
+
+## Rounding
+
+Rounding-to-nearest is not optimal. Since the weights are correlated with each other, the best rounding for each weight is not the best for each tensor. (<https://arxiv.org/pdf/2004.10568>). It is more optimal to consider the entire tensor than individual.
+
+### Adaptive Rounding for Weight Quantization (AdaRound)
+
+**TBA**
+
+# SmoothQuant (W8A8)
+
+Better for compute bounded implementation: context stage, batch inference
+
+Activation outliers destroy quantization performance
+
+-   W8A8 quantization has been industrial standard for CNNs, but not LLMs
+-   Systematic outliers emerge in activations when we scale up LLMs beyond 6.7B. Traditional CNN quantization methods hampers the accuracy
+
+# AWQ: Activation-aware Weight Quantization
+
+Better for memory bounded implementation: decoding stage, single sample
+
+*Hardware friendly low-bit weight-only quantization for LLMs.*
+
+W4A16 for Single-batch serving
+
+LLM decoding is highly memory bounded, W8A8 is not enough
+
+-   W8A8 is good for batch serving (e.g. batch size of 128)
+-   But single-query LLM inference (e.g. local) is still highly memory bounded
+-   We need low-bit weight only quantization (e.g. W4A16) for this setting
+
+Resources
+
+\[1\] Quantization, https://pytorch.org/docs/stable/quantization.html
+
+\[2\] Introduction to Quantization on PyTorch, https://pytorch.org/blog/introduction-to-quantization-on-pytorch/
